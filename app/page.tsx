@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 
@@ -57,6 +57,13 @@ const COLUMNS: ColumnDef[] = [
   { key: "id_form", label: "ID Form", type: "text", role: "Staf Keuangan Manajemen" },
 ];
 
+// Helper functions for dynamic role check
+const isAdminCabang = (role: string) => role === "Admin Cabang" || role === "Admin" || role === "Admin Cabang (Edit)";
+const isCS = (role: string) => role === "Layanan Konsumen" || role === "Layanan Konsumen / CS" || role === "CS" || role === "Layanan Konsumen (CS)";
+const isGudang = (role: string) => role === "Staf Gudang" || role === "Gudang" || role === "Staf Gudang (Logistik & Produksi)";
+const isKeuangan = (role: string) => role === "Staf Keuangan Manajemen" || role === "Keuangan" || role === "Manajemen" || role === "Staf Keuangan" || role === "Staf Keuangan Manajemen (QC & Pengiriman)";
+const isRestrictedBranch = (role: string) => isAdminCabang(role) || isCS(role);
+
 export default function SpreadsheetPage() {
   const router = useRouter();
   const supabase = createClient();
@@ -71,6 +78,17 @@ export default function SpreadsheetPage() {
   const [rows, setRows] = useState<any[]>([]);
   const [originalRows, setOriginalRows] = useState<any[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
+
+  // Sort State
+  const [sortConfig, setSortConfig] = useState<{ key: string; direction: "asc" | "desc" } | null>({ key: "id", direction: "desc" });
+
+  const handleSort = (key: string) => {
+    let direction: "asc" | "desc" = "asc";
+    if (sortConfig && sortConfig.key === key && sortConfig.direction === "asc") {
+      direction = "desc";
+    }
+    setSortConfig({ key, direction });
+  };
 
   // Search & Filtering
   const [searchTerm, setSearchTerm] = useState("");
@@ -181,7 +199,7 @@ export default function SpreadsheetPage() {
       let query = supabase.from("collect_data").select("*");
 
       // Filter query dynamically based on user role & RLS logic
-      if (["Admin Cabang", "Layanan Konsumen / CS"].includes(role)) {
+      if (isRestrictedBranch(role)) {
         query = query.eq("cabang", cabang);
       }
 
@@ -202,10 +220,10 @@ export default function SpreadsheetPage() {
 
   // Check if a cell is editable by the current logged-in role
   const canEditCell = (columnName: string, role: string): boolean => {
-    if (role === "Staf Keuangan Manajemen") {
+    if (isKeuangan(role)) {
       return ["proses_pengiriman", "qc", "resi_pengiriman", "id_form", "cabang"].includes(columnName);
     }
-    if (role === "Staf Gudang") {
+    if (isGudang(role)) {
       const gudangColumns = [
         "nomor_acc_penjualan_silang", "nomor_sp", "alamat_pengiriman", "verifikasi_no_hp",
         "tanggal_kirim_frame", "actual", "tanggal_terima_frame", "sudah_terima_frame",
@@ -215,10 +233,10 @@ export default function SpreadsheetPage() {
       ];
       return gudangColumns.includes(columnName);
     }
-    if (role === "Layanan Konsumen / CS") {
+    if (isCS(role)) {
       return ["nama_cs", "tanggal_telepon", "jam_telepon", "plafon", "resep", "beli"].includes(columnName);
     }
-    if (role === "Admin Cabang") {
+    if (isAdminCabang(role)) {
       return ["nama", "email", "tanggal_lahir", "no_hp", "nomor_kartu", "unit_bri", "promotor", "cabang"].includes(columnName);
     }
     return false;
@@ -270,7 +288,7 @@ export default function SpreadsheetPage() {
       showToast("Koneksi terputus! Sinkronisasi gagal dan data dibatalkan.", "error");
       
       // Rollback local state
-      setRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, [colKey]: oldValue } : r));
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, [colKey]: oldValue } : r));
       
       // Set cell in error state briefly
       setErrorCells(prev => ({ ...prev, [cellId]: true }));
@@ -310,7 +328,7 @@ export default function SpreadsheetPage() {
     } catch (err: any) {
       console.error("Save failed:", err);
       // Rollback UI to oldValue
-      setRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, [colKey]: oldValue } : r));
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, [colKey]: oldValue } : r));
 
       // Trigger cell visual error border
       setErrorCells(prev => ({ ...prev, [cellId]: true }));
@@ -365,7 +383,7 @@ export default function SpreadsheetPage() {
         handled = true;
         break;
       case "ArrowDown":
-        targetRow = Math.min(rows.length - 1, rowIndex + 1);
+        targetRow = Math.min(sortedRows.length - 1, rowIndex + 1);
         handled = true;
         break;
       case "ArrowLeft":
@@ -388,7 +406,7 @@ export default function SpreadsheetPage() {
         } else {
           if (colIndex < COLUMNS.length - 1) {
             targetCol = colIndex + 1;
-          } else if (rowIndex < rows.length - 1) {
+          } else if (rowIndex < sortedRows.length - 1) {
             targetRow = rowIndex + 1;
             targetCol = 0;
           }
@@ -411,19 +429,19 @@ export default function SpreadsheetPage() {
   };
 
   const moveFocus = (rIndex: number, cIndex: number) => {
-    if (rIndex >= 0 && rIndex < rows.length && cIndex >= 0 && cIndex < COLUMNS.length) {
+    if (rIndex >= 0 && rIndex < sortedRows.length && cIndex >= 0 && cIndex < COLUMNS.length) {
       setFocusedCell({ rowIndex: rIndex, colIndex: cIndex, colKey: COLUMNS[cIndex].key });
     }
   };
 
   const startEditing = (rowIndex: number, colIndex: number, colKey: string) => {
-    const row = rows[rowIndex];
+    const row = sortedRows[rowIndex];
     setEditingCell({ rowIndex, colKey });
     setTempValue(row[colKey] ?? "");
   };
 
   const commitEdit = (rowIndex: number, colKey: string) => {
-    const row = rows[rowIndex];
+    const row = sortedRows[rowIndex];
     const rowId = row.id;
     const oldValue = originalRows.find(r => r.id === rowId)?.[colKey];
 
@@ -435,7 +453,7 @@ export default function SpreadsheetPage() {
 
     if (!isValid) {
       // Revert cell in current rows state
-      setRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, [colKey]: oldValue ?? null } : r));
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, [colKey]: oldValue ?? null } : r));
       setErrorCells(prev => ({ ...prev, [`${rowId}-${colKey}`]: true }));
       setTimeout(() => {
         setErrorCells(prev => {
@@ -460,7 +478,7 @@ export default function SpreadsheetPage() {
 
     // Only update if value actually changed
     if (finalValue !== oldValue) {
-      setRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, [colKey]: finalValue } : r));
+      setRows(prev => prev.map(r => r.id === rowId ? { ...r, [colKey]: finalValue } : r));
       saveCell(rowId, colKey, finalValue, oldValue, rowIndex);
     }
 
@@ -469,13 +487,13 @@ export default function SpreadsheetPage() {
 
   // Handles fast boolean toggling
   const handleCheckboxChange = (rowIndex: number, colKey: string, currentValue: boolean) => {
-    const row = rows[rowIndex];
+    const row = sortedRows[rowIndex];
     const rowId = row.id;
     const oldValue = currentValue;
     const newValue = !currentValue;
 
     // Optimistically update
-    setRows(prev => prev.map((r, idx) => idx === rowIndex ? { ...r, [colKey]: newValue } : r));
+    setRows(prev => prev.map(r => r.id === rowId ? { ...r, [colKey]: newValue } : r));
     saveCell(rowId, colKey, newValue, oldValue, rowIndex);
   };
 
@@ -491,7 +509,7 @@ export default function SpreadsheetPage() {
       const newRowData: any = {};
       
       // Auto-fill branch value if user is restricted
-      if (["Admin Cabang", "Layanan Konsumen / CS"].includes(userRole)) {
+      if (isRestrictedBranch(userRole)) {
         newRowData.cabang = userCabang;
       } else {
         newRowData.cabang = "Bandung"; // default fallback for Gudang/Finance
@@ -669,17 +687,16 @@ export default function SpreadsheetPage() {
   const filteredRows = rows.filter((row) => {
     if (searchTerm) {
       const term = searchTerm.toLowerCase();
-      const matchName = row.nama?.toLowerCase().includes(term);
-      const matchEmail = row.email?.toLowerCase().includes(term);
-      const matchNoHp = row.no_hp?.toLowerCase().includes(term);
-      const matchPromotor = row.promotor?.toLowerCase().includes(term);
-      const matchId = String(row.id).includes(term);
-      if (!matchName && !matchEmail && !matchNoHp && !matchPromotor && !matchId) {
-        return false;
-      }
+      // Dynamically search across all columns (including non-text attributes like id, no_hp, nomor_kartu, unit_bri)
+      const isMatch = Object.keys(row).some((key) => {
+        const val = row[key];
+        if (val === null || val === undefined) return false;
+        return String(val).toLowerCase().includes(term);
+      });
+      if (!isMatch) return false;
     }
 
-    if (["Staf Gudang", "Staf Keuangan Manajemen"].includes(userRole) && selectedBranchFilter !== "Semua") {
+    if ((isGudang(userRole) || isKeuangan(userRole)) && selectedBranchFilter !== "Semua") {
       if (row.cabang !== selectedBranchFilter) {
         return false;
       }
@@ -687,6 +704,49 @@ export default function SpreadsheetPage() {
 
     return true;
   });
+
+  // Perform Local Sorting
+  const sortedRows = useMemo(() => {
+    if (!sortConfig) return filteredRows;
+    return [...filteredRows].sort((a, b) => {
+      const { key, direction } = sortConfig;
+      let valA = a[key];
+      let valB = b[key];
+
+      if (valA === null || valA === undefined) {
+        if (valB === null || valB === undefined) return 0;
+        return 1;
+      }
+      if (valB === null || valB === undefined) return -1;
+
+      const colDef = COLUMNS.find(c => c.key === key);
+      const type = colDef?.type;
+
+      if (type === "number" || key === "id") {
+        const numA = Number(valA);
+        const numB = Number(valB);
+        return direction === "asc" ? numA - numB : numB - numA;
+      }
+
+      if (type === "date" || type === "datetime" || key === "created_at" || key === "tanggal_lahir" || key === "tanggal_telepon" || key === "tanggal_kirim_frame" || key === "tanggal_terima_frame" || key === "tanggal_kirim_lensa" || key === "tanggal_terima_lensa" || key === "tanggal_selesai_produksi") {
+        const dateA = new Date(valA).getTime();
+        const dateB = new Date(valB).getTime();
+        return direction === "asc" ? dateA - dateB : dateB - dateA;
+      }
+
+      if (type === "boolean") {
+        const boolA = valA ? 1 : 0;
+        const boolB = valB ? 1 : 0;
+        return direction === "asc" ? boolA - boolB : boolB - boolA;
+      }
+
+      const strA = String(valA).toLowerCase();
+      const strB = String(valB).toLowerCase();
+      if (strA < strB) return direction === "asc" ? -1 : 1;
+      if (strA > strB) return direction === "asc" ? 1 : -1;
+      return 0;
+    });
+  }, [filteredRows, sortConfig]);
 
   if (authLoading) {
     return (
@@ -776,7 +836,7 @@ export default function SpreadsheetPage() {
               <span>{isOnline ? "Online" : "Offline"}</span>
               <span>•</span>
               <span className="text-indigo-400 font-medium">{userRole}</span>
-              {["Admin Cabang", "Layanan Konsumen / CS"].includes(userRole) && (
+              {isRestrictedBranch(userRole) && (
                 <>
                   <span>•</span>
                   <span className="text-sky-400 font-medium">Cabang: {userCabang}</span>
@@ -816,7 +876,7 @@ export default function SpreadsheetPage() {
           </div>
 
           {/* Branch Filter dropdown for Gudang/Manajemen */}
-          {["Staf Gudang", "Staf Keuangan Manajemen"].includes(userRole) && (
+          {(isGudang(userRole) || isKeuangan(userRole)) && (
             <div className="flex items-center space-x-2">
               <span className="text-[10px] text-zinc-500 uppercase font-semibold">Cabang:</span>
               <select
@@ -872,7 +932,7 @@ export default function SpreadsheetPage() {
 
       {/* Main Excel-like spreadsheet workspace grid */}
       <main className="flex-1 overflow-auto bg-zinc-950 relative">
-        {filteredRows.length === 0 ? (
+        {sortedRows.length === 0 ? (
           <div className="absolute inset-0 flex flex-col items-center justify-center p-8 text-center text-zinc-500">
             <svg className="w-12 h-12 text-zinc-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.5" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
@@ -920,7 +980,7 @@ export default function SpreadsheetPage() {
               <tr className="bg-zinc-900/90 text-zinc-400">
                 <th className="w-12 h-10 border-r border-b border-zinc-800 text-[11px] font-semibold text-center select-none sticky left-0 bg-zinc-900 z-50">#</th>
                 {COLUMNS.map((col) => {
-                  let headerClass = "px-3 py-2 border-r border-b border-zinc-800 text-left text-xs font-semibold tracking-wider select-none h-10 ";
+                  let headerClass = "px-3 py-2 border-r border-b border-zinc-800 text-left text-xs font-semibold tracking-wider select-none h-10 cursor-pointer hover:bg-zinc-800 transition-colors ";
                   
                   // Frozen column logic
                   let isFrozen = ["id", "nama", "cabang"].includes(col.key);
@@ -942,10 +1002,18 @@ export default function SpreadsheetPage() {
                         width: col.key === "id" ? "100px" : col.key === "nama" ? "150px" : col.key === "cabang" ? "110px" : "150px",
                         left: isFrozen ? `${leftOffset}px` : undefined,
                       }}
+                      onClick={() => handleSort(col.key)}
                     >
-                      <div className="flex flex-col">
-                        <span className="text-zinc-200 text-xs truncate leading-normal">{col.label}</span>
-                        <span className="text-[10px] text-zinc-500 font-mono tracking-tight font-normal leading-none mt-0.5">{col.key}</span>
+                      <div className="flex items-center justify-between">
+                        <div className="flex flex-col">
+                          <span className="text-zinc-200 text-xs truncate leading-normal">{col.label}</span>
+                          <span className="text-[10px] text-zinc-500 font-mono tracking-tight font-normal leading-none mt-0.5">{col.key}</span>
+                        </div>
+                        {sortConfig?.key === col.key && (
+                          <span className="text-indigo-400 font-bold ml-1 text-xs">
+                            {sortConfig.direction === "asc" ? "▲" : "▼"}
+                          </span>
+                        )}
                       </div>
                     </th>
                   );
@@ -955,7 +1023,7 @@ export default function SpreadsheetPage() {
 
             {/* Table Body */}
             <tbody>
-              {filteredRows.map((row, rowIndex) => (
+              {sortedRows.map((row, rowIndex) => (
                 <tr
                   key={row.id}
                   className="border-b border-zinc-800 hover:bg-zinc-900/20 group h-[38px] transition-colors"
